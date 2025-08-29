@@ -67,6 +67,8 @@ CHIP_FLOPS = {
   "Apple A16 Bionic": DeviceFlops(fp32=1.79*TFLOPS, fp16=3.58*TFLOPS, int8=7.16*TFLOPS),
   "Apple A17 Pro": DeviceFlops(fp32=2.15*TFLOPS, fp16=4.30*TFLOPS, int8=8.60*TFLOPS),
   ### NVIDIA GPUs
+  # RTX 50 series
+  "NVIDIA GEFORCE RTX 5070": DeviceFlops(fp32=30.9*TFLOPS, fp16=61.8*TFLOPS, int8=123.6*TFLOPS),
   # RTX 40 series
   "NVIDIA GEFORCE RTX 4090": DeviceFlops(fp32=82.58*TFLOPS, fp16=165.16*TFLOPS, int8=330.32*TFLOPS),
   "NVIDIA GEFORCE RTX 4080": DeviceFlops(fp32=48.74*TFLOPS, fp16=97.48*TFLOPS, int8=194.96*TFLOPS),
