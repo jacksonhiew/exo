@@ -1,5 +1,6 @@
-from typing import Any
-from pydantic import BaseModel
+from __future__ import annotations
+from typing import Any, List
+from pydantic import BaseModel, Field
 from exo import DEBUG
 import subprocess
 import psutil
@@ -27,6 +28,8 @@ class DeviceCapabilities(BaseModel):
   chip: str
   memory: int
   flops: DeviceFlops
+  # Optional: list of per-GPU capabilities when a device has multiple GPUs (possibly mixed brands)
+  children: List["DeviceCapabilities"] = Field(default_factory=list)
 
   def __str__(self):
     return f"Model: {self.model}. Chip: {self.chip}. Memory: {self.memory}MB. Flops: {self.flops}"
@@ -34,9 +37,25 @@ class DeviceCapabilities(BaseModel):
   def model_post_init(self, __context: Any) -> None:
     if isinstance(self.flops, dict):
       self.flops = DeviceFlops(**self.flops)
+    # Coerce children items if provided as dicts
+    if isinstance(self.children, list):
+      new_children = []
+      for ch in self.children:
+        if isinstance(ch, dict):
+          # nested flops may be dict too
+          f = ch.get("flops")
+          if isinstance(f, dict):
+            ch["flops"] = DeviceFlops(**f)
+          new_children.append(DeviceCapabilities(**ch))
+        else:
+          new_children.append(ch)
+      self.children = new_children
 
   def to_dict(self):
-    return {"model": self.model, "chip": self.chip, "memory": self.memory, "flops": self.flops.to_dict()}
+    base = {"model": self.model, "chip": self.chip, "memory": self.memory, "flops": self.flops.to_dict()}
+    if self.children:
+      base["children"] = [c.to_dict() for c in self.children]
+    return base
 
 
 UNKNOWN_DEVICE_CAPABILITIES = DeviceCapabilities(model="Unknown Model", chip="Unknown Chip", memory=0, flops=DeviceFlops(fp32=0, fp16=0, int8=0))
@@ -181,51 +200,111 @@ async def linux_device_capabilities() -> DeviceCapabilities:
   from tinygrad import Device
 
   if DEBUG >= 2: print(f"tinygrad {Device.DEFAULT=}")
-  if Device.DEFAULT == "CUDA" or Device.DEFAULT == "NV" or Device.DEFAULT == "GPU":
+
+  def _lookup_flops(name: str) -> DeviceFlops:
+    # Try exact, uppercase, and title-case variants
+    return CHIP_FLOPS.get(name) or CHIP_FLOPS.get(name.upper()) or CHIP_FLOPS.get(name.title()) or DeviceFlops(fp32=0, fp16=0, int8=0)
+
+  children = []
+
+  # Enumerate NVIDIA GPUs via NVML, if available
+  try:
     import pynvml
-
     pynvml.nvmlInit()
-    handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-    gpu_raw_name = pynvml.nvmlDeviceGetName(handle).upper()
-    gpu_name = gpu_raw_name.rsplit(" ", 1)[0] if gpu_raw_name.endswith("GB") else gpu_raw_name
-    gpu_memory_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+    try:
+      count = pynvml.nvmlDeviceGetCount()
+      for i in range(count):
+        handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+        raw = pynvml.nvmlDeviceGetName(handle).upper()
+        name = raw.rsplit(" ", 1)[0] if raw.endswith("GB") else raw
+        mem = pynvml.nvmlDeviceGetMemoryInfo(handle).total // 2**20
+        if DEBUG >= 2: print(f"NVIDIA[{i}] {name=} {mem=}")
+        children.append(DeviceCapabilities(
+          model=f"Linux GPU {i} ({name})",
+          chip=name,
+          memory=mem,
+          flops=_lookup_flops(name),
+        ))
+    finally:
+      pynvml.nvmlShutdown()
+  except Exception as e:
+    if DEBUG >= 3:
+      print(f"NVML enumeration failed: {e}")
 
-    if DEBUG >= 2: print(f"NVIDIA device {gpu_name=} {gpu_memory_info=}")
-
-    pynvml.nvmlShutdown()
-
-    return DeviceCapabilities(
-      model=f"Linux Box ({gpu_name})",
-      chip=gpu_name,
-      memory=gpu_memory_info.total // 2**20,
-      flops=CHIP_FLOPS.get(gpu_name, DeviceFlops(fp32=0, fp16=0, int8=0)),
-    )
-  elif Device.DEFAULT == "AMD":
+  # Enumerate AMD GPUs via pyamdgpuinfo, if available
+  try:
     import pyamdgpuinfo
+    gpus = []
+    try:
+      # Preferred API if available
+      if hasattr(pyamdgpuinfo, 'detect_gpus'):
+        gpus = list(pyamdgpuinfo.detect_gpus())
+      else:
+        # Fallback: try indices 0..7
+        for idx in range(8):
+          try:
+            gpus.append(pyamdgpuinfo.get_gpu(idx))
+          except Exception:
+            break
+    except Exception:
+      # As a last resort, try just gpu 0
+      try:
+        g = pyamdgpuinfo.get_gpu(0)
+        gpus = [g]
+      except Exception:
+        gpus = []
 
-    gpu_raw_info = pyamdgpuinfo.get_gpu(0)
-    gpu_name = gpu_raw_info.name
-    gpu_memory_info = gpu_raw_info.memory_info["vram_size"]
+    for j, g in enumerate(gpus):
+      name = getattr(g, 'name', None) or str(g)
+      # memory_info may be a dict with 'vram_size' in bytes
+      try:
+        mem_bytes = g.memory_info.get("vram_size", 0)
+      except Exception:
+        mem_bytes = 0
+      mem = (mem_bytes // 2**20) if isinstance(mem_bytes, int) else 0
+      if DEBUG >= 2: print(f"AMD[{j}] name={name} mem={mem}")
+      children.append(DeviceCapabilities(
+        model=f"Linux GPU AMD {j} ({name})",
+        chip=name,
+        memory=mem,
+        flops=_lookup_flops(name),
+      ))
+  except Exception as e:
+    if DEBUG >= 3:
+      print(f"pyamdgpuinfo enumeration failed: {e}")
 
-    if DEBUG >= 2: print(f"AMD device {gpu_name=} {gpu_memory_info=}")
-
+  if children:
+    n_nvidia = sum(1 for c in children if c.chip.startswith("NVIDIA"))
+    n_amd = sum(1 for c in children if c.chip.startswith("AMD"))
+    parts = []
+    if n_nvidia: parts.append(f"NVIDIA x{n_nvidia}")
+    if n_amd: parts.append(f"AMD x{n_amd}")
+    model_desc = ", ".join(parts)
+    total_mem = sum(c.memory for c in children)
+    total_flops = DeviceFlops(
+      fp32=sum(c.flops.fp32 for c in children),
+      fp16=sum(c.flops.fp16 for c in children),
+      int8=sum(c.flops.int8 for c in children),
+    )
+    chip_desc = "Mixed GPUs" if (n_nvidia and n_amd) else (children[0].chip if len(children) == 1 else ("NVIDIA" if n_nvidia else "AMD"))
     return DeviceCapabilities(
-      model="Linux Box (" + gpu_name + ")",
-      chip=gpu_name,
-      memory=gpu_memory_info // 2**20,
-      flops=CHIP_FLOPS.get(gpu_name, DeviceFlops(fp32=0, fp16=0, int8=0)),
+      model=f"Linux Box ({model_desc})" if model_desc else "Linux Box (GPU)",
+      chip=chip_desc,
+      memory=total_mem,
+      flops=total_flops,
+      children=children,
     )
 
-  else:
-    return DeviceCapabilities(
-      model=f"Linux Box (Device: {Device.DEFAULT})",
-      chip=f"Unknown Chip (Device: {Device.DEFAULT})",
-      memory=psutil.virtual_memory().total // 2**20,
-      flops=DeviceFlops(fp32=0, fp16=0, int8=0),
-    )
+  # Fallback to previous behavior when no GPUs detected
+  return DeviceCapabilities(
+    model=f"Linux Box (Device: {Device.DEFAULT})",
+    chip=f"Unknown Chip (Device: {Device.DEFAULT})",
+    memory=psutil.virtual_memory().total // 2**20,
+    flops=DeviceFlops(fp32=0, fp16=0, int8=0),
+  )
 
 
-def windows_device_capabilities() -> DeviceCapabilities:
+async def windows_device_capabilities() -> DeviceCapabilities:
   import psutil
 
   def get_gpu_info():
@@ -252,45 +331,99 @@ def windows_device_capabilities() -> DeviceCapabilities:
   contains_nvidia = any('nvidia' in gpu_name.lower() for gpu_name in gpu_names)
   contains_amd = any('amd' in gpu_name.lower() for gpu_name in gpu_names)
 
+  def _lookup_flops(name: str) -> DeviceFlops:
+    return CHIP_FLOPS.get(name) or CHIP_FLOPS.get(name.upper()) or CHIP_FLOPS.get(name.title()) or DeviceFlops(fp32=0, fp16=0, int8=0)
+
+  children = []
+
+  # NVIDIA via NVML
   if contains_nvidia:
-    import pynvml
+    try:
+      import pynvml
+      pynvml.nvmlInit()
+      try:
+        count = pynvml.nvmlDeviceGetCount()
+        for i in range(count):
+          handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+          raw = pynvml.nvmlDeviceGetName(handle).upper()
+          name = raw.rsplit(" ", 1)[0] if raw.endswith("GB") else raw
+          mem = pynvml.nvmlDeviceGetMemoryInfo(handle).total // 2**20
+          if DEBUG >= 2: print(f"NVIDIA[{i}] {name=} {mem=}")
+          children.append(DeviceCapabilities(
+            model=f"Windows GPU {i} ({name})",
+            chip=name,
+            memory=mem,
+            flops=_lookup_flops(name),
+          ))
+      finally:
+        pynvml.nvmlShutdown()
+    except Exception as e:
+      if DEBUG >= 3:
+        print(f"NVML enumeration failed on Windows: {e}")
 
-    pynvml.nvmlInit()
-    handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-    gpu_raw_name = pynvml.nvmlDeviceGetName(handle).upper()
-    gpu_name = gpu_raw_name.rsplit(" ", 1)[0] if gpu_raw_name.endswith("GB") else gpu_raw_name
-    gpu_memory_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+  # AMD via pyrsmi/rocml
+  if contains_amd:
+    try:
+      from pyrsmi import rocml
+      rocml.smi_initialize()
+      try:
+        # Try to get device count if available
+        try:
+          count = rocml.smi_get_device_count()
+        except Exception:
+          count = 1
+        for i in range(int(count)):
+          try:
+            name = rocml.smi_get_device_name(i)
+          except Exception:
+            name = "AMD GPU"
+          # Do not upper-case to preserve mapping semantics; keep a separate uppercase for NVIDIA only
+          try:
+            mem_bytes = rocml.smi_get_device_memory_total(i)
+            mem = int(mem_bytes) // 2**20 if mem_bytes is not None else 0
+          except Exception:
+            mem = 0
+          if DEBUG >= 2: print(f"AMD[{i}] name={name} mem={mem}")
+          children.append(DeviceCapabilities(
+            model=f"Windows GPU AMD {i} ({name})",
+            chip=name,
+            memory=mem,
+            flops=_lookup_flops(name),
+          ))
+      finally:
+        try:
+          rocml.smi_shutdown()
+        except Exception:
+          pass
+    except Exception as e:
+      if DEBUG >= 3:
+        print(f"pyrsmi/rocml enumeration failed on Windows: {e}")
 
-    if DEBUG >= 2: print(f"NVIDIA device {gpu_name=} {gpu_memory_info=}")
-
-    return DeviceCapabilities(
-      model=f"Windows Box ({gpu_name})",
-      chip=gpu_name,
-      memory=gpu_memory_info.total // 2**20,
-      flops=CHIP_FLOPS.get(gpu_name, DeviceFlops(fp32=0, fp16=0, int8=0)),
+  if children:
+    n_nvidia = sum(1 for c in children if str(c.chip).upper().startswith("NVIDIA"))
+    n_amd = sum(1 for c in children if str(c.chip).upper().startswith("AMD"))
+    parts = []
+    if n_nvidia: parts.append(f"NVIDIA x{n_nvidia}")
+    if n_amd: parts.append(f"AMD x{n_amd}")
+    model_desc = ", ".join(parts)
+    total_mem = sum(c.memory for c in children)
+    total_flops = DeviceFlops(
+      fp32=sum(c.flops.fp32 for c in children),
+      fp16=sum(c.flops.fp16 for c in children),
+      int8=sum(c.flops.int8 for c in children),
     )
-  elif contains_amd:
-    # For AMD GPUs, pyrsmi is the way (Official python package for rocm-smi)
-    from pyrsmi import rocml
-
-    rocml.smi_initialize()
-    gpu_name = rocml.smi_get_device_name(0).upper()
-    gpu_memory_info = rocml.smi_get_device_memory_total(0)
-
-    if DEBUG >= 2: print(f"AMD device {gpu_name=} {gpu_memory_info=}")
-
-    rocml.smi_shutdown()
-
+    chip_desc = "Mixed GPUs" if (n_nvidia and n_amd) else (children[0].chip if len(children) == 1 else ("NVIDIA" if n_nvidia else "AMD"))
     return DeviceCapabilities(
-      model="Windows Box ({gpu_name})",
-      chip={gpu_name},
-      memory=gpu_memory_info.total // 2**20,
-      flops=DeviceFlops(fp32=0, fp16=0, int8=0),
+      model=f"Windows Box ({model_desc})" if model_desc else "Windows Box (GPU)",
+      chip=chip_desc,
+      memory=total_mem,
+      flops=total_flops,
+      children=children,
     )
-  else:
-    return DeviceCapabilities(
-      model=f"Windows Box (Device: Unknown)",
-      chip=f"Unknown Chip (Device(s): {gpu_names})",
-      memory=psutil.virtual_memory().total // 2**20,
-      flops=DeviceFlops(fp32=0, fp16=0, int8=0),
-    )
+
+  return DeviceCapabilities(
+    model=f"Windows Box (Device: Unknown)",
+    chip=f"Unknown Chip (Device(s): {gpu_names})",
+    memory=psutil.virtual_memory().total // 2**20,
+    flops=DeviceFlops(fp32=0, fp16=0, int8=0),
+  )
