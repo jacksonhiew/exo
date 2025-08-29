@@ -2,6 +2,17 @@ from exo.inference.shard import Shard
 from typing import Optional, List
 
 model_cards = {
+  # OpenAI GPT-OSS 20B (Hugging Face: openai/gpt-oss-20b)
+  # NOTE: Current engines in this repo do not implement the "gpt_oss" architecture.
+  # Adding this entry enables download/indexing; loading will require adding an
+  # exo.inference.mlx.models.gpt_oss (or compatible) implementation.
+  "gpt-oss-20b": {
+    "layers": 24,  # from config.json: num_hidden_layers
+    "repo": {
+      # Provide MLX mapping first; tinygrad not supported for this arch yet
+      "MLXDynamicShardInferenceEngine": "openai/gpt-oss-20b",
+    },
+  },
   ### llama
   "llama-3.3-70b": {
     "layers": 80,
@@ -155,6 +166,7 @@ model_cards = {
 }
 
 pretty_name = {
+  "gpt-oss-20b": "GPT-OSS 20B",
   "llama-3.3-70b": "Llama 3.3 70B",
   "llama-3.2-1b": "Llama 3.2 1B",
   "llama-3.2-1b-8bit": "Llama 3.2 1B (8-bit)",
