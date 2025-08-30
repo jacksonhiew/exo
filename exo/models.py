@@ -2,17 +2,6 @@ from exo.inference.shard import Shard
 from typing import Optional, List
 
 model_cards = {
-  # OpenAI GPT-OSS 20B (Hugging Face: openai/gpt-oss-20b)
-  # NOTE: Current engines in this repo do not implement the "gpt_oss" architecture.
-  # Adding this entry enables download/indexing; loading will require adding an
-  # exo.inference.mlx.models.gpt_oss (or compatible) implementation.
-  "gpt-oss-20b": {
-    "layers": 24,  # from config.json: num_hidden_layers
-    "repo": {
-      # Provide MLX mapping first; tinygrad not supported for this arch yet
-      "MLXDynamicShardInferenceEngine": "openai/gpt-oss-20b",
-    },
-  },
   ### llama
   "llama-3.3-70b": {
     "layers": 80,
@@ -150,14 +139,7 @@ model_cards = {
   "qwen-2.5-coder-32b": { "layers": 64, "repo": { "MLXDynamicShardInferenceEngine": "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit", }, },
   "qwen-2.5-72b": { "layers": 80, "repo": { "MLXDynamicShardInferenceEngine": "mlx-community/Qwen2.5-72B-Instruct-4bit", }, },
   "qwen-2.5-math-72b": { "layers": 80, "repo": { "MLXDynamicShardInferenceEngine": "mlx-community/Qwen2.5-Math-72B-Instruct-4bit", }, },
-  # Qwen3 Coder 30B A3B Instruct (HF: Qwen/Qwen3-Coder-30B-A3B-Instruct)
-  # Note: model_type is qwen3_moe; MLX arch not implemented in this repo yet.
-  # Adding this entry enables download/indexing; loading requires qwen3_moe support.
-  "qwen-3-coder-30b-a3b": { "layers": 48, "repo": { 
-      # Allows downloading via MLX or tinygrad code paths; inference still unsupported
-      "MLXDynamicShardInferenceEngine": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
-      "TinygradDynamicShardInferenceEngine": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
-    }, },
+  
   ### nemotron
   "nemotron-70b": { "layers": 80, "repo": { "MLXDynamicShardInferenceEngine": "mlx-community/nvidia_Llama-3.1-Nemotron-70B-Instruct-HF_4bit", }, },
   "nemotron-70b-bf16": { "layers": 80, "repo": { "MLXDynamicShardInferenceEngine": "mlx-community/Llama-3.1-Nemotron-70B-Instruct-HF-bf16", }, },
@@ -174,7 +156,6 @@ model_cards = {
 }
 
 pretty_name = {
-  "gpt-oss-20b": "GPT-OSS 20B",
   "llama-3.3-70b": "Llama 3.3 70B",
   "llama-3.2-1b": "Llama 3.2 1B",
   "llama-3.2-1b-8bit": "Llama 3.2 1B (8-bit)",
@@ -218,7 +199,6 @@ pretty_name = {
   "llama-3-8b": "Llama 3 8B",
   "llama-3-70b": "Llama 3 70B",
   "stable-diffusion-2-1-base": "Stable Diffusion 2.1",
-  "qwen-3-coder-30b-a3b": "Qwen3 Coder 30B A3B (Instruct)",
   "deepseek-r1-distill-qwen-1.5b": "DeepSeek R1 Distill Qwen 1.5B",
   "deepseek-r1-distill-qwen-1.5b-3bit": "DeepSeek R1 Distill Qwen 1.5B (3-bit)",
   "deepseek-r1-distill-qwen-1.5b-6bit": "DeepSeek R1 Distill Qwen 1.5B (6-bit)",
